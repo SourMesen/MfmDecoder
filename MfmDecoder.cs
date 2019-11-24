@@ -22,11 +22,13 @@ namespace MfmDecoder
 		bool _failed = false;
 		int _pageCount = 0;
 
+		List<int> _headerBits = new List<int>();
 		List<byte> _rawData = new List<byte>();
 		List<List<byte>> _pages = new List<List<byte>>();
 
 		public MfmDecoder(string wavFile)
 		{
+			System.Diagnostics.Debug.WriteLine("Processing: " + Path.GetFileName(wavFile));
 			_wavFile = wavFile;
 
 			int wavHeaderSize = 44;
@@ -55,6 +57,7 @@ namespace MfmDecoder
 		{
 			if(_rawData.Count > 0) {
 				_pages.Add(_rawData);
+				_pageCount++;
 				string filename = Path.GetFileNameWithoutExtension(_wavFile) + "\\" + "Page" + _pageCount;
 				Directory.CreateDirectory(Path.GetFileNameWithoutExtension(_wavFile));
 				if(_rawData[0] != 0xC5) {
@@ -64,7 +67,6 @@ namespace MfmDecoder
 					filename += ".BadData";
 				}
 				File.WriteAllBytes(filename + ".bin", _rawData.ToArray());
-				_pageCount++;
 			}
 
 			_rawData = new List<byte>();
@@ -73,27 +75,36 @@ namespace MfmDecoder
 			_expectZero = false;
 			_currentByte = 0;
 			_bitCounter = 0;
+			_headerBits = new List<int>();
 		}
 
 		private void AddBit(int bit)
 		{
-			if(_expectZero) {
-				if(bit != 0) {
-					throw new Exception("0 bit expected (start of byte marker)");
-				} else {
-					_bitCounter = 8;
-					_expectZero = false;
-				}
-			} else if(_bitCounter > 0) {
-				_bitCounter--;
-				_currentByte |= (byte)(bit << _bitCounter);
+			if(_dataStarted) {
+				if(_expectZero) {
+					if(bit != 0) {
+						if(_dataStarted) {
+							//throw new Exception("0 bit expected (start of byte marker)");
+							System.Diagnostics.Debug.WriteLine("0 bit expected (start of byte marker)");
+							_failed = true;
+						}
+					} else {
+						_bitCounter = 8;
+						_expectZero = false;
+					}
+				} else if(_bitCounter > 0) {
+					_bitCounter--;
+					_currentByte |= (byte)(bit << _bitCounter);
 
-				if(_bitCounter == 0) {
-					//System.Diagnostics.Debug.WriteLine("Full byte: " + currentByte.ToString("X2"));
-					_rawData.Add(_currentByte);
-					_currentByte = 0;
-					_expectZero = true;
+					if(_bitCounter == 0) {
+						//System.Diagnostics.Debug.WriteLine("Full byte: " + currentByte.ToString("X2"));
+						_rawData.Add(_currentByte);
+						_currentByte = 0;
+						_expectZero = true;
+					}
 				}
+			} else {
+				_headerBits.Add(bit);
 			}
 			//System.Diagnostics.Debug.WriteLine("Bit: " + (bit == 1 ? "1" : "0") + " Counter: " + dataCounter + " Zero: " + (expectZero ? "T" : "F") + " Data: " + currentByte.ToString("X2"));
 			_lastBit = bit;
@@ -132,25 +143,40 @@ namespace MfmDecoder
 					}
 
 					int timeGap = i - _lastClock;
+					if(timeGap < 6) {
+						//Ignore this peak, probably a false positive
+						if(_dataStarted) {
+							System.Diagnostics.Debug.WriteLine("Gap between clocks too small, ignoring clock: " + i.ToString());
+						}
+						continue;
+					}
+
 					_lastClock = i;
 
 					if(timeGap > 70000) {
 						//A large gap was detected, write current data to disk and start a new page
 						SavePage();
-						_lastBit = 0;
 						_failed = false;
 						continue;
 					}
 
-					if(_failed) {
+					/*if(_failed) {
 						//Wait until we find a large gap before restarting
 						continue;
-					}
+					}*/
 
 					//System.Diagnostics.Debug.WriteLine("Clock: " + i.ToString() + "  Gap: " + timeGap.ToString());
 					try {
-						if(timeGap >= 20 || timeGap < 6) {
-							throw new Exception("unexpected clock");
+						if(timeGap > 1000) {
+							//Try to find another 0 followed by 1 sequence
+							_dataStarted = false;
+							_headerBits = new List<int>();
+						} else if(timeGap > 20) {
+							if(_dataStarted) {
+								System.Diagnostics.Debug.WriteLine("Gap too large: " + i.ToString());
+								_failed = true;
+								//throw new Exception("unexpected clock");
+							}
 						} else {
 							if(_lastBit == 1) {
 								if(timeGap <= 10) {
@@ -173,24 +199,45 @@ namespace MfmDecoder
 									//13-15 sample gap: 0-1
 									AddBit(1);
 
-									if(!_dataStarted) {
-										//If this is the first 1 bit we find, the next bit should be a 0 and then the first byte starts
-										_dataStarted = true;
-										_expectZero = true;
-										_currentByte = 0;
+									if(!_dataStarted && _headerBits.Count > 10) {
+										bool validTrackStart = true;
+										for(int j = 0; j < 10; j++) {
+											if(_headerBits[_headerBits.Count - 2 - j] != 0) {
+												validTrackStart = false;
+												break;
+											}
+										}
+
+										if(validTrackStart) {
+											//If this is the first 1 bit we find, the next bit should be a 0 and then the first byte starts
+											System.Diagnostics.Debug.WriteLine("Started new data track at: " + i.ToString());
+											_dataStarted = true;
+											_expectZero = true;
+											_currentByte = 0;
+										} else {
+											_lastBit = 0;
+										}
 									}
 								} else {
 									//16-19 sample gap (4 half bits)
 									//Should not be possible after a 0 value
-									throw new Exception("unexpected delay");
+									if(_dataStarted) {
+										System.Diagnostics.Debug.WriteLine("Gap too large (after 0): " + i.ToString());
+										//throw new Exception("unexpected delay");
+										_failed = true;
+										//AddBit(1);
+									}
 								}
 							}
 						}
 					} catch {
-						//An exception occurred (too small/large gap, or invalid 0 bit + 8 data bits pattern
-						//Clear everything up and try again
+						//An exception occurred (too small/large gap, or invalid 0 bit + 8 data bits pattern)
 						System.Diagnostics.Debug.WriteLine("Failed to process page");
 						_failed = true;
+					}
+
+					if(!_dataStarted) {
+						_lastBit = 0;
 					}
 				}
 			}
