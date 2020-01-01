@@ -31,9 +31,14 @@ namespace MfmDecoder
 		int _pageCount = 0;
 		int _cutoffFreq = 0;
 
-		List<int> _headerBits = new List<int>();
+		int _zeroBitCounter = 0;
+		int _leadInPosition = 0;
+
 		List<byte> _rawData = new List<byte>();
 		List<PageInfo> _pages = new List<PageInfo>();
+
+		StringBuilder _pageLog = new StringBuilder();
+		StringBuilder _errorLog = new StringBuilder();
 
 		public MfmDecoder(string wavFile)
 		{
@@ -73,9 +78,16 @@ namespace MfmDecoder
 			_expectZero = false;
 			_currentByte = 0;
 			_bitCounter = 0;
-			_headerBits = new List<int>();
+			_zeroBitCounter = 0;
 			_failed = false;
 			_samples = _originalSamples;
+		}
+
+		private void Log(string message)
+		{
+			if(_cutoffFreq == 0) {
+				_pageLog.AppendLine(message);
+			}
 		}
 
 		private void SavePage(int currentSamplePosition)
@@ -85,21 +97,28 @@ namespace MfmDecoder
 			if(_rawData.Count > 0) {
 				_pageCount++;
 				string filepath = Path.GetFileNameWithoutExtension(_wavFile) + "\\" + "Page" + _pageCount;
-				Directory.CreateDirectory(Path.GetFileNameWithoutExtension(_wavFile));
 				if(_rawData[0] != 0xC5) {
 					filepath += ".InvalidHeader";
+					Log("Page index " + _pages.Count + " failed - bad header (Start: " + _dataStartPosition + ")");
 					_allPagesValid = false;
 				}
 				if(_failed) {
+					Log("Page index " + _pages.Count + " failed (Start: " + _dataStartPosition + ")");
 					filepath += ".BadData";
 					_allPagesValid = false;
 				}
 
-				int pageNumber = _rawData[5];
+				if(_leadInPosition > _dataStartPosition) {
+					_allPagesValid = false;
+					Log("Lead-in should be before data start position");
+				}
+
+				//int pageNumber = _rawData.Count > 5 ? _rawData[5] : -100;
 
 				_pages.Add(new PageInfo() {
 					FileName = Path.GetFileName(filepath + ".bin"),
 					StartPosition = _dataStartPosition,
+					LeadInPosition = _leadInPosition,
 					Data = _rawData
 				});
 				//System.Diagnostics.Debug.WriteLine("Writing: " + filepath + " (Number=" + pageNumber.ToString() + ").bin");
@@ -109,22 +128,28 @@ namespace MfmDecoder
 				} else {
 					//System.Diagnostics.Debug.WriteLine("Page Index " + pageNumber.ToString() + " passed (" + _cutoffFreq.ToString() + ")");
 				}
-				File.WriteAllBytes(filepath + " (Number=" + pageNumber.ToString() + ").bin", _rawData.ToArray());
+				//Directory.CreateDirectory(Path.GetFileNameWithoutExtension(_wavFile));
+				//File.WriteAllBytes(filepath + " (Number=" + pageNumber.ToString() + ").bin", _rawData.ToArray());
 
+				_leadInPosition = 0;
 				_dataStartPosition = 0;
+				Log("----");
 			}
 
+			_errorLog.Append(_pageLog.ToString());
+			_pageLog.Clear();
 			Reset();
 		}
 
-		private void AddBit(int bit)
+		private void AddBit(int bit, int i)
 		{
 			if(_dataStarted) {
 				if(_expectZero) {
 					if(bit != 0) {
 						if(_dataStarted) {
-							System.Diagnostics.Debug.WriteLine("0 bit expected (start of byte marker)");
+							Log("0 bit expected (start of byte marker) (Position: " + i + ")");
 							_failed = true;
+							_expectZero = false;
 						}
 					} else {
 						_bitCounter = 8;
@@ -141,8 +166,6 @@ namespace MfmDecoder
 						_expectZero = true;
 					}
 				}
-			} else {
-				_headerBits.Add(bit);
 			}
 			//System.Diagnostics.Debug.WriteLine("Bit: " + (bit == 1 ? "1" : "0") + " Counter: " + dataCounter + " Zero: " + (expectZero ? "T" : "F") + " Data: " + currentByte.ToString("X2"));
 			_lastBit = bit;
@@ -228,7 +251,7 @@ namespace MfmDecoder
 
 					if(timeGap > 70000) {
 						//A large gap was detected, write current data to disk and start a new page
-						if(_retryCount < 2 && (_failed || _rawData.Count > 0 && _rawData[0] != 0xC5)) {
+						if(_retryCount < 2 && (_failed || (_rawData.Count > 0 && _rawData[0] != 0xC5))) {
 							//If the current page is invalid, try applying a filter and trying again
 							_retryCount++;
 							Reset();
@@ -245,11 +268,12 @@ namespace MfmDecoder
 
 					lastClockType = clockType;
 
-					//System.Diagnostics.Debug.WriteLine("Clock: " + i.ToString() + "  Gap: " + timeGap.ToString());
+					//Log("Clock: " + i.ToString() + "  Gap: " + timeGap.ToString());
+
 					try {
 						if(timeGap > 1000) {
 							//Try to find another 0 followed by 1 sequence
-							if(_retryCount < 2 && (_failed || _rawData.Count > 0 && _rawData[0] != 0xC5)) {
+							if(_retryCount < 2 && (_failed || (_rawData.Count > 0 && _rawData[0] != 0xC5))) {
 								//If the current page is invalid, try applying a filter and trying again
 								_retryCount++;
 								Reset();
@@ -262,43 +286,43 @@ namespace MfmDecoder
 							SavePage(i);
 						} else if(timeGap > 20) {
 							if(_dataStarted) {
-								System.Diagnostics.Debug.WriteLine("Gap too large: " + i.ToString());
+								Log("Gap too large: " + i.ToString() + " (Gap: " + timeGap + ")");
 								_failed = true;
 							}
 						} else {
 							if(_lastBit == 1) {
-								if(timeGap <= 10) {
+								if(timeGap <= 11) {
 									//6-10 sample gap: 1-1
-									AddBit(1);
+									AddBit(1, i);
 								} else if(timeGap <= 15) {
 									//13-15 sample gap: 1-0-0
-									AddBit(0);
-									AddBit(0);
+									AddBit(0, i);
+									AddBit(0, i);
 								} else {
 									//16-19 sample gap: 1-0-1
-									AddBit(0);
-									AddBit(1);
+									AddBit(0, i);
+									AddBit(1, i);
 								}
+								_zeroBitCounter = 0;
 							} else {
-								if(timeGap <= 10) {
+								if(timeGap <= 11) {
 									//6-10 sample gap: 0-0
-									AddBit(0);
+									AddBit(0, i);
+									if(!_dataStarted) {
+										//Track lead-in start & length
+										_zeroBitCounter++;
+										if(_zeroBitCounter == 1) {
+											_leadInPosition = i;
+										}
+									}
 								} else if(timeGap <= 15) {
 									//13-15 sample gap: 0-1
-									AddBit(1);
+									AddBit(1, i);
 
-									if(!_dataStarted && _headerBits.Count > 10) {
-										bool validTrackStart = true;
-										for(int j = 0; j < 10; j++) {
-											if(_headerBits[_headerBits.Count - 2 - j] != 0) {
-												validTrackStart = false;
-												break;
-											}
-										}
-
-										if(validTrackStart) {
+									if(!_dataStarted) {
+										if(_zeroBitCounter > 10) {
 											//If this is the first 1 bit we find, the next bit should be a 0 and then the first byte starts
-											System.Diagnostics.Debug.WriteLine("Started new data track at: " + i.ToString());
+											Log("Started new data track at: " + i.ToString());
 											_dataStarted = true;
 											if(_dataStartPosition == 0) {
 												_dataStartPosition = i;
@@ -309,20 +333,23 @@ namespace MfmDecoder
 											_lastBit = 0;
 										}
 									}
+
+									_zeroBitCounter = 0;
 								} else {
 									//16-19 sample gap (4 half bits)
 									//Should not be possible after a 0 value
+									_zeroBitCounter = 0;
 									if(_dataStarted) {
-										System.Diagnostics.Debug.WriteLine("Gap too large (after 0): " + i.ToString());
+										Log("Gap too large (after 0): " + i.ToString() + " (Gap: " + timeGap + ")");
 										_failed = true;
 										//AddBit(1);
 									}
 								}
 							}
 						}
-					} catch {
+					} catch(Exception ex) {
 						//An exception occurred (too small/large gap, or invalid 0 bit + 8 data bits pattern)
-						System.Diagnostics.Debug.WriteLine("Failed to process page");
+						Log("Failed to process page: " + ex.ToString());
 						_failed = true;
 					}
 
@@ -337,20 +364,24 @@ namespace MfmDecoder
 			if(_failedIndex.Count > 0) {
 				System.Diagnostics.Debug.WriteLine("Failed " + _failedIndex.Count + " pages (" + (_failedIndex.Count * 100 / _pages.Count) + "%)");
 			}
+			
+			Directory.CreateDirectory("output");
 
 			if(!_allPagesValid) {
+				File.WriteAllText(Path.Combine("output", waveName + "_errors.txt"), _errorLog.ToString());
 				return;
 			}
 
-			using(BinaryWriter writer = new BinaryWriter(File.Open(Path.Combine(waveName, waveName + ".studybox"), FileMode.Create), Encoding.UTF8)) {
+			using(BinaryWriter writer = new BinaryWriter(File.Open(Path.Combine("output", waveName + ".studybox"), FileMode.Create), Encoding.UTF8)) {
 				writer.Write(Encoding.UTF8.GetBytes("STBX"));
 				writer.Write(4); //Chunk Length
 				writer.Write(0x100); //Version 1.00
 
 				foreach(PageInfo page in _pages) {
 					writer.Write(Encoding.UTF8.GetBytes("PAGE"));
-					writer.Write(page.Data.Count + 4); //Chunk length
-					writer.Write(page.StartPosition); //Start position for this data track (in samples)
+					writer.Write(page.Data.Count + 8); //Chunk length
+					writer.Write(page.LeadInPosition); //Start position for this data track's lead in sequence (in samples)
+					writer.Write(page.StartPosition); //Start position for this data track (in samples) (first bit of data)
 					writer.Write(page.Data.ToArray()); //Page data
 				}
 
@@ -371,6 +402,12 @@ namespace MfmDecoder
 					wavData.Add(waveFile[i+1]);
 				}
 
+				int riffChunkSize = wavData.Count - 8;
+				wavData[4] = (byte)(riffChunkSize & 0xFF);
+				wavData[5] = (byte)((riffChunkSize >> 8) & 0xFF);
+				wavData[6] = (byte)((riffChunkSize >> 16) & 0xFF);
+				wavData[7] = (byte)((riffChunkSize >> 24) & 0xFF);
+
 				writer.Write(Encoding.UTF8.GetBytes("AUDI"));
 				writer.Write(wavData.Count + 4); //Chunk length
 				writer.Write(0); //Audio file type ($0 = WAV)
@@ -383,6 +420,7 @@ namespace MfmDecoder
 	{
 		public string FileName;
 		public int StartPosition;
+		public int LeadInPosition;
 		public List<byte> Data;
 	}
 }
