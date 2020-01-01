@@ -377,13 +377,25 @@ namespace MfmDecoder
 				writer.Write(4); //Chunk Length
 				writer.Write(0x100); //Version 1.00
 
-				foreach(PageInfo page in _pages) {
+				StringBuilder sb = new StringBuilder();
+				for(int i = 0; i < _pages.Count; i++) {
+					PageInfo page = _pages[i];
+					
+					sb.AppendLine("Page index #" + i);
+					sb.AppendLine("Internal page ID: " + page.Data[5].ToString());
+					sb.AppendLine("Lead-in start position: " + page.LeadInPosition);
+					sb.AppendLine("Lead-in size: " + (page.StartPosition - page.LeadInPosition));
+					sb.AppendLine("Data start position: " + page.StartPosition);
+					sb.AppendLine("---------------------------");
+					sb.AppendLine("");
+
 					writer.Write(Encoding.UTF8.GetBytes("PAGE"));
 					writer.Write(page.Data.Count + 8); //Chunk length
 					writer.Write(page.LeadInPosition); //Start position for this data track's lead in sequence (in samples)
 					writer.Write(page.StartPosition); //Start position for this data track (in samples) (first bit of data)
 					writer.Write(page.Data.ToArray()); //Page data
 				}
+				File.WriteAllText(Path.Combine("output", waveName + "-pageinfo.txt"), sb.ToString());
 
 				byte[] waveFile = File.ReadAllBytes(_wavFile);
 				List<byte> wavData = new List<byte>();
