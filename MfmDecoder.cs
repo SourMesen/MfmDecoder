@@ -402,7 +402,7 @@ namespace MfmDecoder
 				for(int i = 0; i < 44; i++) {
 					wavData.Add(waveFile[i]);
 				}
-				wavData[0x16] = 1; //Make this a mono file
+
 				uint dataSize = (uint)(wavData[0x28] | (wavData[0x29] << 8) | (wavData[0x2A] << 16) | (wavData[0x2B] << 24));
 				dataSize /= 2;
 				wavData[0x28] = (byte)(dataSize & 0xFF);
@@ -413,6 +413,19 @@ namespace MfmDecoder
 					wavData.Add(waveFile[i]);
 					wavData.Add(waveFile[i+1]);
 				}
+
+				//nChannels = 1
+				wavData[0x16] = 1; //Make this a mono file
+
+				//nAvgBytesPerSec = 88200 bytes / second
+				wavData[0x1C] = 0x88;
+				wavData[0x1D] = 0x58;
+				wavData[0x1E] = 0x01;
+				wavData[0x1F] = 0x00;
+
+				//nBlockAlign = 2 bytes per block (align)
+				wavData[0x20] = 0x02;
+				wavData[0x21] = 0x00;
 
 				int riffChunkSize = wavData.Count - 8;
 				wavData[4] = (byte)(riffChunkSize & 0xFF);
